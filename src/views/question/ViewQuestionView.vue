@@ -1,6 +1,7 @@
 <template>
   <div id="viewQuestionView">
     <a-row :gutter="[24, 24]">
+      <!-- 左侧：题目信息 -->
       <a-col :md="12" :xs="24">
         <a-tabs default-active-key="question">
           <a-tab-pane key="question" title="题目">
@@ -32,10 +33,14 @@
               </template>
             </a-card>
           </a-tab-pane>
-          <a-tab-pane key="comment" title="评论" disabled>评论区</a-tab-pane>
-          <a-tab-pane key="answer" title="答案">暂时无法查看答案</a-tab-pane>
+          <a-tab-pane key="answer" title="答案">
+            <div v-if="isAdmin">{{ question?.answer ?? "" }}</div>
+            <div v-else>暂无权限查看答案</div>
+          </a-tab-pane>
         </a-tabs>
       </a-col>
+
+      <!-- 右侧：代码编辑与结果展示 -->
       <a-col :md="12" :xs="24">
         <a-form :model="form" layout="inline">
           <a-form-item
@@ -65,16 +70,16 @@
           <a-button
             type="primary"
             style="min-width: 200px"
-            @click="doSubmit"
-            :loading="submitting"
+            @click="doSubmitOptimized"
+            :loading="submittingOptimized"
           >
             提交代码
           </a-button>
           <a-button
             type="primary"
             style="min-width: 200px"
-            @click="getFeedback"
-            :loading="feedbackLoading"
+            @click="doSubmitWeak"
+            :loading="submittingWeak"
           >
             获取反馈
           </a-button>
@@ -105,7 +110,9 @@
           >
             <template #title>
               {{
-                feedback.errorType === "无错误"
+                !feedback.errorType
+                  ? "⚠️ 分析异常"
+                  : feedback.errorType === "无错误"
                   ? "✅ 代码正确"
                   : "🔍 发现问题：" + feedback.errorType
               }}
@@ -122,34 +129,34 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, withDefaults, defineProps } from "vue";
+import { onMounted, ref, withDefaults, defineProps, type Ref } from "vue";
 import {
   QuestionControllerService,
   QuestionSubmitAddRequest,
-  QuestionSubmitControllerService,
   QuestionVO,
 } from "../../../generated";
 import message from "@arco-design/web-vue/es/message";
 import CodeEditor from "@/components/CodeEditor.vue";
 import MdViewer from "@/components/MdViewer.vue";
-import { generateFeedback } from "@/api/feedback";
 import axios from "axios";
+import store from "@/store";
+import ACCESS_ENUM from "@/access/accessEnum";
+import checkAccess from "@/access/checkAccess";
 
-// 设置 axios 全局配置（绝对地址，解决代理问题）
+// 设置 axios 全局配置
 axios.defaults.baseURL = "http://localhost:8121";
 axios.defaults.withCredentials = true;
 
 interface Props {
   id: string;
 }
-
 const props = withDefaults(defineProps<Props>(), {
   id: () => "",
 });
 
 const question = ref<QuestionVO>();
-const submitting = ref(false);
-const feedbackLoading = ref(false);
+const submittingOptimized = ref(false);
+const submittingWeak = ref(false);
 const feedback = ref<any>(null);
 const judgeResult = ref<any>(null);
 const judgeInfo = ref<any>({});
@@ -171,9 +178,7 @@ const loadData = async () => {
   }
 };
 
-/**
- * 安全解析 judgeInfo
- */
+// 安全解析 judgeInfo
 const parseJudgeInfo = (judgeInfoData: any) => {
   if (!judgeInfoData) return {};
   if (typeof judgeInfoData === "string") {
@@ -187,10 +192,8 @@ const parseJudgeInfo = (judgeInfoData: any) => {
   return judgeInfoData;
 };
 
-/**
- * 提交代码，自动轮询判题结果和 DeepSeek 反馈
- */
-const doSubmit = async () => {
+// 通用提交和轮询（移除超时逻辑）
+const submitAndPoll = async (apiPath: string, loadingRef: Ref<boolean>) => {
   if (!question.value?.id) return;
 
   // 重置状态
@@ -198,21 +201,19 @@ const doSubmit = async () => {
   judgeInfo.value = {};
   feedback.value = null;
   if (pollTimer) clearInterval(pollTimer);
+  loadingRef.value = true;
 
-  submitting.value = true;
   try {
-    const res = await QuestionSubmitControllerService.doQuestionSubmitUsingPost(
-      {
-        ...form.value,
-        questionId: question.value.id,
-      }
-    );
-    if (res.code !== 0) {
-      message.error("提交失败，" + res.message);
-      submitting.value = false;
+    const res = await axios.post(apiPath, {
+      ...form.value,
+      questionId: question.value.id,
+    });
+    if (res.status !== 200 || res.data.code !== 0) {
+      message.error("提交失败，" + (res.data.message || "未知错误"));
+      loadingRef.value = false;
       return;
     }
-    const submitId = res.data;
+    const submitId = res.data.data;
     message.success("提交成功，正在判题和分析...");
 
     let hasJudge = false;
@@ -252,58 +253,32 @@ const doSubmit = async () => {
             hasFeedback = true;
           }
         } catch (err) {
-          console.error("DeepSeek 轮询错误", err);
+          console.error("反馈轮询错误", err);
         }
       }
 
+      // 两者均获取到后停止轮询
       if (hasJudge && hasFeedback) {
         clearInterval(pollTimer!);
-        submitting.value = false;
+        loadingRef.value = false;
         message.success("分析完成");
       }
     }, 2000);
-
-    // 60秒超时
-    setTimeout(() => {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        submitting.value = false;
-        if (!hasJudge) message.warning("判题超时，请稍后刷新页面查看");
-        if (!hasFeedback) message.warning("AI 分析超时");
-      }
-    }, 60000);
   } catch (error: any) {
     console.error(error);
     message.error("提交失败，" + error.message);
-    submitting.value = false;
+    loadingRef.value = false;
   }
 };
 
-/**
- * 单独获取 DeepSeek 反馈
- */
-const getFeedback = async () => {
-  if (!form.value.code?.trim()) {
-    message.warning("请先编写代码");
-    return;
-  }
-  feedbackLoading.value = true;
-  feedback.value = null;
-  try {
-    const response = await generateFeedback({
-      code: form.value.code,
-      language: form.value.language,
-      questionDescription: question.value?.content || "",
-    });
-    feedback.value = response.data;
-    message.success("反馈生成成功");
-  } catch (error) {
-    console.error(error);
-    message.error("获取反馈失败，请稍后重试");
-  } finally {
-    feedbackLoading.value = false;
-  }
-};
+let loginUser = store.state.user.loginUser;
+const needAccess = ACCESS_ENUM.ADMIN;
+const isAdmin = checkAccess(loginUser, ACCESS_ENUM.ADMIN);
+
+const doSubmitOptimized = () =>
+  submitAndPoll("/api/question_submit/optimized", submittingOptimized);
+const doSubmitWeak = () =>
+  submitAndPoll("/api/question_submit/weak", submittingWeak);
 
 const changeCode = (value: string) => {
   form.value.code = value;

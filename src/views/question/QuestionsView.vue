@@ -33,9 +33,11 @@
       </template>
       <template #acceptedRate="{ record }">
         {{
-          `${
-            record.submitNum ? record.acceptedNum / record.submitNum : "0"
-          }% (${record.acceptedNum}/${record.submitNum})`
+          record.submitNum
+            ? `${Math.round((record.acceptedNum / record.submitNum) * 100)}% (${
+                record.acceptedNum
+              }/${record.submitNum})`
+            : "0% (0/0)"
         }}
       </template>
       <template #createTime="{ record }">
